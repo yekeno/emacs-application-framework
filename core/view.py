@@ -22,7 +22,7 @@
 import platform
 
 from core.utils import current_desktop, eval_in_emacs, focus_emacs_buffer, get_emacs_func_cache_result, get_emacs_var
-from PyQt6.QtCore import QEvent, QPoint, Qt
+from PyQt6.QtCore import QEvent, QPoint, Qt, QTimer
 from PyQt6.QtGui import QBrush, QPainter, QWindow
 from PyQt6.QtWidgets import QFrame, QGraphicsView, QVBoxLayout, QWidget
 
@@ -53,8 +53,15 @@ class View(QWidget):
 
         self.buffer = buffer
 
+        mode = get_emacs_var("eaf-niri-window-mode") or "tiling"
+
         # Init widget attributes.
-        if get_emacs_func_cache_result("eaf-emacs-running-in-wayland-native", []):
+        if current_desktop == "niri":
+            if mode == "tiling":
+                self.setWindowFlags(Qt.WindowType.Window)
+            else:
+                self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        elif get_emacs_func_cache_result("eaf-emacs-running-in-wayland-native", []):
             self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.WindowOverridesSystemGestures | Qt.WindowType.BypassWindowManagerHint)
         elif get_emacs_func_cache_result("eaf-emacs-not-use-reparent-technology", []):
             self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.NoDropShadowWindowHint)
@@ -77,6 +84,12 @@ class View(QWidget):
         self.y: int = int(self.y)
         self.width: int = int(self.width)
         self.height: int = int(self.height)
+        if mode == "floating":
+            self.window_title = f"eaf-float.py-{self.x}-{self.y}"
+        elif mode == "adaptive":
+            self.window_title = f"eaf.py-{self.x}-{self.y}"
+        else:
+            self.window_title = f"eaf-tile.py-{self.x}-{self.y}"
         self.emacs_frame_geometry = (
             tuple(map(int, view_parts[6:10]))
             if len(view_parts) >= 10 else None)
@@ -102,6 +115,11 @@ class View(QWidget):
         self.layout.addWidget(self.graphics_view)
 
         # NOTE: show function must start before resize to trigger *first* resizeEvent after show.
+        # Set the title before mapping so compositor rules matching `eaf.py-*'
+        # (for example niri's `open-floating') can take effect on the first map.
+        if get_emacs_func_cache_result("eaf-emacs-running-in-wayland-native", []):
+            self.setWindowTitle(self.window_title)
+
         self.show()
 
         # Resize after show to trigger fit view operation.
@@ -226,7 +244,7 @@ class View(QWidget):
         if not get_emacs_func_cache_result("eaf-emacs-running-in-wayland-native", []):
             return
 
-        title = f"eaf.py-{self.x}-{self.y}"
+        title = self.window_title
         if current_desktop == "Hyprland":
             import subprocess
 
@@ -239,3 +257,55 @@ class View(QWidget):
             subprocess.Popen(f"swaymsg 'for_window [title={title}] floating enable;"
                              f"for_window [title={title}] move position {self.x} {self.y}'", shell=True)
             self.setWindowTitle(title)
+        elif current_desktop == "niri":
+            self.niri_place_window(title, 0)
+
+    def niri_place_window(self, title, attempt):
+        """Position this window through niri's IPC according to eaf-niri-window-mode."""
+        import json
+        import subprocess
+
+        win = None
+        try:
+            output = subprocess.check_output(
+                ["niri", "msg", "--json", "windows"],
+                stderr=subprocess.DEVNULL, text=True, timeout=2)
+            win = next((w for w in json.loads(output) if w.get("title") == title), None)
+        except Exception:
+            win = None
+
+        if win is None:
+            try:
+                alive = self.isVisible()
+            except RuntimeError:
+                alive = False
+            if alive and attempt < 40:
+                QTimer.singleShot(50, lambda: self.niri_place_window(title, attempt + 1))
+            return
+
+        window_id = str(win["id"])
+        mode = get_emacs_var("eaf-niri-window-mode") or "tiling"
+        try:
+            if mode == "tiling":
+                # Ensure window is tiled into niri columns
+                if win.get("is_floating"):
+                    subprocess.run(["niri", "msg", "action", "move-window-to-tiling",
+                                    "--id", window_id],
+                                   check=False, timeout=2)
+            elif mode == "floating":
+                # Ensure window is floating and placed at buffer coordinates
+                if not win.get("is_floating"):
+                    subprocess.run(["niri", "msg", "action", "move-window-to-floating",
+                                    "--id", window_id],
+                                   check=False, timeout=2)
+                subprocess.run(["niri", "msg", "action", "move-floating-window",
+                                "--id", window_id, "-x", str(self.x), "-y", str(self.y)],
+                               check=False, timeout=2)
+            elif mode == "adaptive":
+                # If window is currently floating, update coordinates; if tiled, leave in tiling layout
+                if win.get("is_floating"):
+                    subprocess.run(["niri", "msg", "action", "move-floating-window",
+                                    "--id", window_id, "-x", str(self.x), "-y", str(self.y)],
+                                   check=False, timeout=2)
+        except Exception:
+            pass

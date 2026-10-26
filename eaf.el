@@ -1087,6 +1087,47 @@ provide at least one way to let everyone experience EAF. ;)"
   (defun eaf--on-hyprland-p ()
     (string-equal (getenv "XDG_CURRENT_DESKTOP") "Hyprland"))
 
+  (defun eaf--on-niri-p ()
+    (or (string-equal (getenv "XDG_CURRENT_DESKTOP") "niri")
+        (string-equal (getenv "XDG_SESSION_DESKTOP") "niri")))
+
+  (defcustom eaf-niri-window-mode 'tiling
+    "Window layout mode for EAF in niri compositor.
+'tiling   - Open as a native niri tiling column (participates in scrolling and gestures)
+'floating - Open as a floating overlay directly on top of Emacs buffer
+'adaptive - Preserve user-toggled layout (respects manual toggle-window-floating)"
+    :type '(choice (const :tag "Native niri tiling column" tiling)
+                   (const :tag "Floating overlay on Emacs" floating)
+                   (const :tag "Adaptive / preserve user state" adaptive))
+    :group 'eaf)
+
+  (defvar eaf-niri-frame-offset '(0 . 0)
+    "Screen offset of the Emacs frame under niri.
+niri does not expose on-screen positions of tiled windows, so EAF
+assumes the Emacs frame starts at the working area origin (true for
+fullscreen and maximized frames).  Set this to (X . Y) when the frame
+is tiled away from the origin, e.g. `(setq eaf-niri-frame-offset '(0 . 32))'.")
+
+  (defun eaf--niri-focused-app ()
+    "Return a name for the focused niri window, in EAF's front-app convention."
+    (let ((json (ignore-errors
+                  (json-parse-string
+                   (shell-command-to-string "niri msg --json focused-window")))))
+      (if (hash-table-p json)
+          (let ((title (gethash "title" json))
+                (app-id (gethash "app_id" json))
+                (pid (gethash "pid" json)))
+            (cond ((and (stringp title)
+                        (or (string-prefix-p "eaf.py-" title)
+                            (string-prefix-p "eaf-float.py-" title)
+                            (string-prefix-p "eaf-tile.py-" title)))
+                   "python")
+                  ((equal pid (emacs-pid))
+                   "emacs")
+                  ((stringp app-id) app-id)
+                  (t "")))
+        "")))
+
   (defun eaf--on-unity-p ()
     (string-equal (getenv "XDG_CURRENT_DESKTOP") "Unity"))
 
@@ -1109,6 +1150,8 @@ provide at least one way to let everyone experience EAF. ;)"
                            (or
                             (gethash "class" (json-parse-string (shell-command-to-string "hyprctl -j activewindow")))
                             ""))
+                          ((eaf--on-niri-p)
+                           (eaf--niri-focused-app))
                           ((eaf--on-unity-p)
                            (if (executable-find "xdotool")
                                (shell-command-to-string "xdotool getactivewindow getwindowname")
@@ -1291,6 +1334,8 @@ Such as, wayland native, macOS etc."
 		         (when (equal (gethash "pid" (aref clients i)) (emacs-pid))
 		           (setq coordinate (gethash "at" (aref clients i)))))
                (list (aref coordinate 0) (aref coordinate 1))))
+            ((eaf--on-niri-p)
+             (list (car eaf-niri-frame-offset) (cdr eaf-niri-frame-offset)))
             (t
              (require 'dbus)
              (let* ((coordinate (eaf--split-number
@@ -1310,6 +1355,8 @@ Such as, wayland native, macOS etc."
                0
              ;; `32' is titlebar of Gnome3, we need change this value in other environment.
              (cond ((eaf--on-hyprland-p)
+                    0)
+                   ((eaf--on-niri-p)
                     0)
                    ((eaf--on-sway-p)
                     (string-to-number (shell-command-to-string
@@ -1877,10 +1924,13 @@ So multiple EAF buffers visiting the same file do not sync with each other."
 	        (shell-command (format "hyprctl dispatch focuswindow pid:%d" (emacs-pid)))
 	      (eaf-call-async "eval_function" (or eaf--buffer-id buffer_id) "move_cursor_to_nearest_border" (key-description (this-command-keys-vector)))))
 
-      ;; Activate the window by `wmctrl' when possible
-      (if (executable-find "wmctrl")
-          (shell-command-to-string (format "wmctrl -i -a $(wmctrl -lp | awk -vpid=$PID '$3==%s {print $1; exit}')" (emacs-pid)))
-        (message "Please install wmctrl to active Emacs window.")))))
+      ;; Activate the window by `wmctrl' when possible.  Native Wayland
+      ;; toplevels are invisible to wmctrl and focusing is compositor
+      ;; controlled, so skip the misleading error message there.
+      (unless (eaf-emacs-running-in-wayland-native)
+        (if (executable-find "wmctrl")
+            (shell-command-to-string (format "wmctrl -i -a $(wmctrl -lp | awk -vpid=$PID '$3==%s {print $1; exit}')" (emacs-pid)))
+          (message "Please install wmctrl to active Emacs window."))))))
 
 (defun eaf--activate-emacs-mac-window()
   "Activate Emacs macOS window."
