@@ -148,6 +148,41 @@ chmod +x ./install-eaf.py
 
 - EAF 浏览器以及 PDF 浏览器支持 Emacs 内置书签操作， 通过使用`M-x bookmark-set`（默认`C-x r m`）以及`M-x bookmark-bmenu-list`（默认`C-x r l`）。
 
+## Wayland / niri 平铺合成器支持 (yekeno fork)
+
+本分支增加了对现代 Wayland 滚动平铺合成器 **niri** 的深度适配，解决了 Wayland 下传统 EAF 悬浮窗脱离平铺流与滚动错位的问题，支持**原生平铺列**与**浮动覆盖**双模式无缝并存：
+
+### 1. 布局模式配置
+在 Emacs 中通过 `eaf-niri-window-mode` 自由切换：
+```elisp
+;; 布局模式选项：
+;; 'tiling   : 作为 niri 原生平铺列打开（默认，完美融入 niri 横向手势滚动流与多列管理）
+;; 'floating : 传统浮动覆盖模式（模拟内嵌在 Emacs 窗格之上）
+;; 'adaptive : 保持用户当前状态（允许随时通过 niri 快捷键切换浮动/平铺而不被抢回）
+(setq eaf-niri-window-mode 'tiling)
+```
+
+### 2. niri 窗口规则配置 (`~/.config/niri/config.kdl`)
+```kdl
+// EAF 浮动覆盖模式规则
+window-rule {
+    match title=r#"^eaf-float\.py-"#
+    open-floating true
+}
+
+// EAF 原生平铺列规则（默认占据 50% 宽度，支持手势横向平滑滚动）
+window-rule {
+    match title=r#"^eaf(-tile)?\.py-"#
+    open-floating false
+    default-column-width { proportion 0.5; }
+}
+```
+
+### 3. 常用窗口操作
+- **关闭当前页面**：在 EAF 网页或 PDF 中直接按 **`x`** 即可快速关闭当前页面；亦可在 Emacs 中按正常的 `kill-buffer` (`SPC b d`)，或按 niri 关闭窗口快捷键。
+- **切换平铺/浮动**：随时按 niri 的全局切换浮动快捷键（默认 `Mod+Space` 或 `Mod+V`），或在 Emacs 中调用 `(call-process "niri" nil nil nil "msg" "action" "toggle-window-floating")`。
+- **调整窗口列宽**：平铺模式下，直接使用 niri 的 `Mod+R` 即可自由缩放 EAF 窗口宽度。
+
 ## 更新
 建议你时常`git pull` **并且** 运行`install-eaf.py` (`M-x eaf-install-and-update`)来更新各个 EAF 应用及其依赖。
 
